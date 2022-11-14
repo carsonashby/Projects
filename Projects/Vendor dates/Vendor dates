@@ -1,0 +1,175 @@
+from cmath import e
+from datetime import datetime
+from inspect import trace
+from json.tool import main
+from re import S
+import traceback
+from pandas import NaT
+from datetime import datetime
+
+from sqlalchemy import null
+if __name__ == "__main__":
+    #Setup and import
+    import pyodbc   
+    import pandas as pd
+    eway = 'KUNSHAN HENGJU ELECTRONIC'
+    malata = 'MALATA'
+    cci = 'CCI'
+    vendor = eway
+    #Read our vendor spreadsheet
+    Sheet_df = pd.read_excel(r'C:\Projects\Vendor dates\Vendor dates.xlsx')
+    #Spreadsheet cleaning
+    Sheet_df = Sheet_df.dropna(how='all', subset=['Planned Partial NPA Ship', 'Actual Partial NPA Ship', 'Planned NPA Ship', 'Actual NPA Ship'])
+    Sheet_df = Sheet_df.drop_duplicates(subset=["Console Number"])
+    Sheet_df.replace(to_replace='EWAY', value='KUNSHAN HENGJU ELECTRONIC', inplace=True)
+    Sheet_df = Sheet_df.reset_index(drop=True)
+    
+    print(Sheet_df)
+    
+    #Setup the SQl Connection
+    conn = pyodbc.connect('Driver={SQL Server};'
+                        'Server=SQLSRV02;'
+                        'Database=RDDatabase;'
+                        'Trusted_Connection=yes;')
+    cursor = conn.cursor()
+
+    
+    #Setup output
+    Status_df = pd.DataFrame(columns=['Console Number', 'Planned Partial NPA Ship', 'Actual Partial NPA Ship', 'Planned NPA Ship', 'Actual NPA Ship', 'Vendor'])
+    #Setup to search through all of our datapoints
+    try:
+        for i in range(Sheet_df.shape[0]):
+            
+            SearchTarget = Sheet_df['Console Number'][i]
+            
+            vendor = Sheet_df['Vendor'][i]
+            
+            SQL_df = pd.read_sql_query('EXEC [dbo].[DAL_Testing_GetConsoleDates] @Consolename = "{}"'.format(SearchTarget), conn)
+            SQL_df = SQL_df[SQL_df['VName'] == vendor]
+            SQL_df = SQL_df.drop(columns = ['VName'])
+            SQL_df = SQL_df.set_index('ScheduleDateName')
+
+
+            #add as many as are available to our answer key
+            sqlData = []
+            asdIDXlist = []
+            for j in range(4):
+                try:
+                    if j == 0:
+                        sqlData.append(SQL_df.at['Confirmed Partial NPA Ship', 'PlanCmpltDate'])
+                        asdIDXlist.append(SQL_df.at['Confirmed Partial NPA Ship', 'asdIDX'])
+                    elif j == 1:
+                        sqlData.append(SQL_df.at['Confirmed Partial NPA Ship', 'ActualCmpltDate'])
+                        asdIDXlist.append(SQL_df.at['Confirmed Partial NPA Ship', 'asdIDX'])
+                    elif j == 2:
+                        sqlData.append(SQL_df.at['Confirmed NPA Ship', 'PlanCmpltDate'])
+                        asdIDXlist.append(SQL_df.at['Confirmed NPA Ship', 'asdIDX'])
+                    else:
+                        sqlData.append(SQL_df.at['Confirmed NPA Ship', 'ActualCmpltDate'])
+                        asdIDXlist.append(SQL_df.at['Confirmed NPA Ship', 'asdIDX'])
+                except:
+                    sqlData.append('No Date')
+                    asdIDXlist.append(None)
+                    pass
+            #Create answer key
+            
+            SQL_ser = pd.Series(data = sqlData, index = ['Planned Partial NPA Ship', 'Actual Partial NPA Ship', 'Planned NPA Ship', 'Actual NPA Ship']) 
+            if not SQL_ser.empty:
+                #Append the output with the target
+                Status_df.loc[len(Status_df.index)] = [SearchTarget, '', '', '', '', vendor]
+                
+                #Check each date
+                for item in list(SQL_ser.index):
+                    if pd.isnull(Sheet_df.at[i, item]):
+                        continue
+                    #If our search and target are the same
+                    elif pd.to_datetime(Sheet_df.at[i, item], errors='ignore') == pd.to_datetime(arg = SQL_ser.at[item], errors='ignore'):
+                        Status_df.at[i, item] = 'Correct date already in the system: ' + SQL_ser.at[item]
+                    #If they aren't, check for mismatched dates or update
+                    
+                    elif pd.notnull(SQL_ser.at[item]):
+                        Status_df.at[i, item] = 'Date mismatch, System Date:' + str(SQL_ser.at[item]) + ' Vendor Date:' + str(Sheet_df.at[i, item])
+                    else:
+                        modificationDateTemp = datetime.now()
+                        modificationDate = modificationDateTemp.strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        asdIDX = asdIDXlist[SQL_ser.index.get_loc(item)]
+
+                        if item == 'Planned Partial NPA Ship' or item == 'Planned NPA Ship':
+                            updateDate = Sheet_df.at[i, item]
+                            query = ("EXEC [dbo].[DAL_Schedules_Schedules_Queries_UpdatePlanCmpltDate_V3] @asdIDX='{}',@newDate='{}',@UserID='E26BFC06-7365-4764-96F0-854B717F5C11',@modificationDate='{}'".format(int(asdIDX), updateDate, modificationDate))
+                            cursor.execute(query)
+                            Status_df.at[i, item] = 'Updated succesfully date updated to: ' + str(Sheet_df.at[i, item])
+                            query = ("EXEC [dbo].[DAL_Schedules_Schedules_ScheduleNotes_Insert] @asdIDX='{}', @sncIDX='26', @Impact=NULL, @ScheduleNote='Updated per vendor', @CreatedBy='E26BFC06-7365-4764-96F0-854B717F5C11'".format(int(asdIDX)))
+                            cursor.execute(query)
+                        
+                        else:
+                            #query = ("EXEC [dbo].[DAL_Schedules_Schedules_ScheduleNotes_Insert] @asdIDX='{}', @sncIDX='26', @Impact=NULL, @ScheduleNote='Updated per vendor', @CreatedBy='E26BFC06-7365-4764-96F0-854B717F5C11'".format(int(asdIDX)))
+                            
+                            if item == 'Actual Partial NPA Ship':
+                                if pd.notnull(Sheet_df[i, 'PNPA Tracking Number']):
+                                #try:
+                                    updateDate = Sheet_df.at[i, item]
+                                    query = ("EXEC [dbo].[DAL_Schedules_Schedules_Queries_UpdateActualCmpltDate_V4] @asdIDX='{}',@CmpltDate='{}',@UserID='E26BFC06-7365-4764-96F0-854B717F5C11',@modificationDate='{}'".format(int(asdIDX), updateDate, modificationDate))
+                                    cursor.execute(query)
+                                    Status_df.at[i, item] = 'Updated succesfully date updated to: ' + str(Sheet_df.at[i, item])
+
+                                    trackingNumber = Sheet_df[i, 'PNPA Tracking Number']
+                                    query = ("EXEC [dbo].[DAL_Schedules_Schedules_ScheduleNotes_Insert] @asdIDX='{}', @sncIDX='26', @Impact=NULL, @ScheduleNote='Tracking number for confirmed date = {}', @CreatedBy='E26BFC06-7365-4764-96F0-854B717F5C11'".format(int(asdIDX), trackingNumber))
+                                    cursor.execute(query)
+
+                                else:
+                                    Status_df.at[i, item] = 'No tracking number, date not changed:  ' + str(Sheet_df.at[i, item])
+                                #except Exception as e:
+                                 #   Status_df.at[i, item] = Status_df.at[i, item] + ' No tracking number'
+                                  #  print(e)
+
+                            else:
+                                #try:
+                                if pd.notnull(Sheet_df[i, 'NPA Tracking Number']):
+                                    updateDate = Sheet_df.at[i, item]
+                                    query = ("EXEC [dbo].[DAL_Schedules_Schedules_Queries_UpdateActualCmpltDate_V4] @asdIDX='{}',@CmpltDate='{}',@UserID='E26BFC06-7365-4764-96F0-854B717F5C11',@modificationDate='{}'".format(int(asdIDX), updateDate, modificationDate))
+                                    cursor.execute(query)
+                                    Status_df.at[i, item] = 'Updated succesfully date updated to: ' + str(Sheet_df.at[i, item])
+
+                                    trackingNumber = Sheet_df[i, 'NPA Tracking Number']
+                                    query = ("EXEC [dbo].[DAL_Schedules_Schedules_ScheduleNotes_Insert] @asdIDX='{}', @sncIDX='26', @Impact=NULL, @ScheduleNote='Tracking number for confirmed date = {}', @CreatedBy='E26BFC06-7365-4764-96F0-854B717F5C11'".format(int(asdIDX), trackingNumber))
+                                    cursor.execute(query)
+
+                                else:
+                                    Status_df.at[i, item] = 'No tracking number, date not changed:  ' + str(Sheet_df.at[i, item])
+                                #except Exception as e:
+                                 #   print(e)
+                                  #  Status_df.at[i, item] = Status_df.at[i, item] + ' No tracking number'
+
+                        #If don't match and system is null, update
+        #If returns nothing
+            else:
+                Status_df.loc[len(Status_df.index)] = [SearchTarget, "Failed to locate any data", '', '', '', vendor]
+            print(Status_df)
+    except ValueError as e:
+        print(e)
+        pass
+
+    #Print to doc
+    conn.commit()
+    Status_df.replace(to_replace='KUNSHAN HENGJU ELECTRONIC', value='EWAY', inplace=True)
+    Status_df.to_excel("output.xlsx") 
+
+
+
+
+
+"""Confirmed Partial NPA Ship = Shipping Date (PNPA Sample) (edited)
+
+Confirmed NPA ship = Shipping Date (NPA Sample) (edited)
+
+PNPA date should match our Partial NPA ship
+
+NPA date should match our NPA Ship
+
+Malata also goes by Juanlita
+
+Eway and Kunshan are the same
+
+Looks like Avast corresponds to CCI"""

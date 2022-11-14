@@ -1,0 +1,6 @@
+This project takes a spreadsheet from a tablet vendor compares it to what we currently have in the system and then writes to our database with whats new.
+
+For more specifics, we read the vendor xlsx file with pandas, connect to our sql database using pyodbc and then move on to comparison.
+We check if the date in the database is the same as on the file, if so we don't need to change anything.
+Second, if the database has a corresponding date that's not what we have on the file, we notate it but don't change anything so someone can investigate further.
+Finally, if the database doesn't have a corresponding date, we make sure we have a tracking number and then we update the database with our date from the file.
